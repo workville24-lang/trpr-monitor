@@ -4,8 +4,8 @@ import os
 import httpx
 from datetime import datetime
 
-TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
+TELEGRAM_BOT_TOKEN = os.environ["8633052932:AAHduQEu8c2c_RduDBqODxmnvyRR521yLgI"]
+TELEGRAM_CHAT_ID   = os.environ["1142832493"]
 
 CHECK_INTERVAL_SECONDS = 300  # каждые 5 минут
 
