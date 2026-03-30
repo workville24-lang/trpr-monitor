@@ -1,17 +1,29 @@
-import json
 import time
 import logging
 import os
-import schedule
-import anthropic
 import httpx
 from datetime import datetime
 
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID   = os.environ["TELEGRAM_CHAT_ID"]
-ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 
-CHECK_INTERVAL_MINUTES = 20
+CHECK_INTERVAL_SECONDS = 300  # каждые 5 минут
+
+URLS_TO_MONITOR = [
+    "https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/tr-pr-pathway.html",
+    "https://www.canada.ca/en/immigration-refugees-citizenship/news.html",
+]
+
+KEYWORDS_OPEN = [
+    "apply now",
+    "applications are open",
+    "intake is open",
+    "submit your application",
+    "start your application",
+    "application portal",
+    "now accepting",
+    "open for applications",
+]
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,25 +31,6 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 log = logging.getLogger(__name__)
-
-SYSTEM_PROMPT = """You are a monitor for the Canadian TR to PR (Temporary Resident to Permanent Resident) immigration program.
-Search the web for the latest status of TR to PR 2026 applications on IRCC website.
-
-Return ONLY a valid JSON object - no markdown, no backticks, no explanation:
-{
-  "status": "open" or "not_open" or "unknown",
-  "summary_ru": "1-2 sentence summary in Russian",
-  "source": "URL or source name, or null",
-  "confidence": 0-100
-}
-
-Definitions:
-- open = Applications are actively being accepted RIGHT NOW on ircc.canada.ca
-- not_open = Program is announced but NOT yet accepting applications
-- unknown = Not enough information found
-"""
-
-client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
 
 def send_telegram(text):
@@ -57,39 +50,19 @@ def send_telegram(text):
         return False
 
 
-def check_ircc():
-    log.info("Checking TR to PR status...")
+def check_page(url):
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=600,
-            system=SYSTEM_PROMPT,
-            tools=[{"type": "web_search_20250305", "name": "web_search"}],
-            messages=[{
-                "role": "user",
-                "content": (
-                    "Search for 'TR to PR 2026 Canada IRCC applications open intake' "
-                    "and 'Canada temporary resident permanent resident pathway 2026'. "
-                    "Are applications currently being accepted?"
-                )
-            }]
-        )
-
-        text = "".join(
-            block.text for block in response.content
-            if block.type == "text"
-        )
-
-        clean = text.strip().replace("```json", "").replace("```", "").strip()
-        start = clean.find("{")
-        end   = clean.rfind("}") + 1
-        result = json.loads(clean[start:end])
-        log.info(f"Status: {result.get('status')} | Confidence: {result.get('confidence')}%")
-        return result
-
+        r = httpx.get(url, timeout=15, follow_redirects=True, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        })
+        content = r.text.lower()
+        for keyword in KEYWORDS_OPEN:
+            if keyword.lower() in content:
+                return True, keyword
+        return False, None
     except Exception as e:
-        log.error(f"Check error: {e}")
-        return {"status": "unknown", "summary_ru": f"Error: {e}", "confidence": 0, "source": None}
+        log.error(f"Error fetching {url}: {e}")
+        return False, None
 
 
 alert_sent = False
@@ -97,53 +70,45 @@ alert_sent = False
 
 def run_check():
     global alert_sent
+    now = datetime.now().strftime("%d.%m.%Y %H:%M")
+    log.info(f"Checking IRCC pages... {now}")
 
-    result = check_ircc()
-    status     = result.get("status")
-    confidence = result.get("confidence", 0)
-    summary    = result.get("summary_ru", "-")
-    now        = datetime.now().strftime("%d.%m.%Y %H:%M")
+    for url in URLS_TO_MONITOR:
+        found, keyword = check_page(url)
+        if found:
+            if not alert_sent:
+                log.info(f"OPEN! Found keyword: '{keyword}' on {url}")
+                send_telegram(
+                    f"TR TO PR - ZAYAVKI OTKRYTY!\n\n"
+                    f"Naydeno: '{keyword}'\n\n"
+                    f"Podavayte nemedlenno:\n"
+                    f"{url}\n\n"
+                    f"Time: {now}"
+                )
+                alert_sent = True
+            return
 
-    if status == "open" and confidence >= 70:
-        if not alert_sent:
-            log.info("OPEN! Sending alert...")
-            send_telegram(
-                f"TR TO PR - ZAYAVKI OTKRYTY!\n\n"
-                f"{summary}\n\n"
-                f"Podavayte nemedlenno:\n"
-                f"https://www.canada.ca/en/immigration-refugees-citizenship/services/immigrate-canada/tr-pr-pathway.html\n\n"
-                f"Time: {now}"
-            )
-            alert_sent = True
-        else:
-            log.info("Alert already sent.")
-    else:
-        if status != "open":
-            alert_sent = False
-        log.info(f"Check done: {status} ({confidence}%) - not open yet")
+    if not alert_sent:
+        log.info("Not open yet - no keywords found")
 
 
 def main():
     log.info("=" * 50)
-    log.info("TR to PR Monitor started")
-    log.info(f"Interval: every {CHECK_INTERVAL_MINUTES} minutes")
+    log.info("TR to PR Monitor started (no API - free!)")
+    log.info(f"Checking every {CHECK_INTERVAL_SECONDS // 60} minutes")
     log.info("=" * 50)
 
     now = datetime.now().strftime("%d.%m.%Y %H:%M")
     send_telegram(
-        f"TR to PR Monitor started\n"
-        f"Will check IRCC every {CHECK_INTERVAL_MINUTES} minutes.\n"
-        f"Will alert when applications open!\n"
+        f"TR to PR Monitor started!\n"
+        f"Checking IRCC directly every {CHECK_INTERVAL_SECONDS // 60} minutes.\n"
+        f"No API costs - completely free!\n"
         f"Start: {now}"
     )
 
-    run_check()
-
-    schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(run_check)
-
     while True:
-        schedule.run_pending()
-        time.sleep(30)
+        run_check()
+        time.sleep(CHECK_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
